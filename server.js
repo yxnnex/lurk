@@ -10,8 +10,8 @@ const path = require('path');
 const USERNAME = (process.env.TWITCH_USERNAME || '').trim().toLowerCase(); // usuario del bot (la cuenta nueva)
 const OAUTH_TOKEN = (process.env.TWITCH_OAUTH || '').trim();                // ej: oauth:xxxxxxxx
 const CLIENT_ID = (process.env.TWITCH_CLIENT_ID || '').trim();
-const REDIS_URL = process.env.UPSTASH_REDIS_REST_URL;     // recomendado: guarda la lista de canales y a quién ya saludó
-const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
+const REDIS_URL = (process.env.UPSTASH_REDIS_REST_URL || '').trim().replace(/\/+$/, ''); // recomendado: guarda la lista de canales y a quién ya saludó
+const REDIS_TOKEN = (process.env.UPSTASH_REDIS_REST_TOKEN || '').trim();
 const PORT = process.env.PORT || 10000;
 const ADMIN_PASSWORD = (process.env.ADMIN_PASSWORD || '').trim(); // contraseña del panel web (index.html)
 
@@ -33,8 +33,10 @@ if (!USERNAME || !OAUTH_TOKEN || !CLIENT_ID) {
   console.error('❌ Faltan variables de entorno: TWITCH_USERNAME, TWITCH_OAUTH y TWITCH_CLIENT_ID son obligatorias');
   process.exit(1);
 }
-if (!REDIS_URL || !REDIS_TOKEN) {
-  console.warn('⚠️ Sin Upstash: los cambios de canales con !lurk y los follows saludados se pierden al reiniciar.');
+
+const usaRedis = Boolean(REDIS_URL && REDIS_TOKEN);
+if (!usaRedis) {
+  console.warn('⚠️ Sin Upstash: los cambios de canales con !lurk, saludos y follows saludados se pierden al reiniciar.');
 }
 
 // ==========================================
@@ -44,6 +46,7 @@ let client = null;
 
 // Enviar mensaje sin que un error tire abajo el bot
 async function decir(canal, mensaje) {
+  if (!client || !mensaje) return;
   try {
     await client.say(canal, mensaje);
   } catch (e) {
@@ -51,7 +54,7 @@ async function decir(canal, mensaje) {
   }
 }
 
-const TOKEN_API = OAUTH_TOKEN.replace(/^oauth:/, '');
+const TOKEN_API = OAUTH_TOKEN.replace(/^oauth:/i, '');
 const idsCache = new Map();
 
 async function helix(ruta, metodo = 'GET', cuerpo = null) {
@@ -82,12 +85,13 @@ async function idDeUsuario(login) {
   return id;
 }
 
-const usaRedis = Boolean(REDIS_URL && REDIS_TOKEN);
-
 async function redisCmd(...args) {
   const res = await fetch(REDIS_URL, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${REDIS_TOKEN}` },
+    headers: {
+      Authorization: `Bearer ${REDIS_TOKEN}`,
+      'Content-Type': 'application/json'
+    },
     body: JSON.stringify(args),
     signal: AbortSignal.timeout(8000)
   });
@@ -97,7 +101,66 @@ async function redisCmd(...args) {
 }
 
 // ==========================================
-// LISTA DE CANALES A LURKEAR (editable con !lurk, guardada en Upstash)
+// MENSAJES CONFIGURABLES (saludos online y follows)
+// ==========================================
+const CLAVE_MENSAJES = `lurk:mensajes:${CANAL_FOLLOWS}`;
+const MENSAJES_DEFAULT = {
+  online: [
+    'Holaaa {nombre}',
+    'Holi {nombre}! :3',
+    'Holi {nombre}'
+  ],
+  followUno: 'holis {nombre}, gracias por el folou',
+  followVarios: 'holis {nombre}, gracias por los folous'
+};
+
+let mensajesConfig = { ...MENSAJES_DEFAULT, online: [...MENSAJES_DEFAULT.online] };
+
+function normalizarMensajes(raw) {
+  const online = Array.isArray(raw?.online)
+    ? raw.online.map((l) => String(l || '').trim()).filter(Boolean).slice(0, 30)
+    : [...MENSAJES_DEFAULT.online];
+
+  const followUno = String(raw?.followUno ?? MENSAJES_DEFAULT.followUno).trim().slice(0, 400);
+  const followVarios = String(raw?.followVarios ?? MENSAJES_DEFAULT.followVarios).trim().slice(0, 400);
+
+  return {
+    online: online.length ? online : [...MENSAJES_DEFAULT.online],
+    followUno: followUno || MENSAJES_DEFAULT.followUno,
+    followVarios: followVarios || MENSAJES_DEFAULT.followVarios
+  };
+}
+
+async function cargarMensajes() {
+  if (usaRedis) {
+    try {
+      const guardados = await redisCmd('GET', CLAVE_MENSAJES);
+      if (guardados) {
+        const parsed = typeof guardados === 'string' ? JSON.parse(guardados) : guardados;
+        mensajesConfig = normalizarMensajes(parsed);
+        return;
+      }
+    } catch (e) {
+      console.error('[MENSAJES] Error leyendo Upstash:', e.message);
+    }
+  }
+  mensajesConfig = normalizarMensajes(mensajesConfig);
+}
+
+async function guardarMensajes(nuevos) {
+  mensajesConfig = normalizarMensajes(nuevos);
+  if (usaRedis) {
+    await redisCmd('SET', CLAVE_MENSAJES, JSON.stringify(mensajesConfig));
+  }
+  return mensajesConfig;
+}
+
+function aplicarPlantilla(plantilla, nombre) {
+  return String(plantilla || '').replace(/\{nombre\}/g, nombre);
+}
+
+// ==========================================
+// LISTA DE CANALES A LURKEAR (editable con !lurk y panel web, guardada en Upstash)
 // ==========================================
 const CLAVE_CANALES = 'lurk:canales';
 let canalesOnline = [];
@@ -128,12 +191,6 @@ const COOLDOWN_BIENVENIDA = 3 * 60 * 60 * 1000; // evita saludar de nuevo si el 
 const enVivoAntes = new Map();
 const ultimaBienvenida = new Map();
 
-const SALUDOS_ONLINE = (n) => [
-  `Holaaa ${n} `,
-  `Holi ${n}! :3`,
-  `Holi ${n}
-];
-
 async function revisarOnline() {
   if (!canalesOnline.length) return;
   try {
@@ -156,8 +213,9 @@ async function revisarOnline() {
       ultimaBienvenida.set(canal, Date.now());
 
       const nombre = vivos.get(canal).user_name;
-      const opciones = SALUDOS_ONLINE(nombre);
-      await decir(`#${canal}`, opciones[Math.floor(Math.random() * opciones.length)]);
+      const opciones = mensajesConfig.online;
+      const elegida = opciones[Math.floor(Math.random() * opciones.length)];
+      await decir(`#${canal}`, aplicarPlantilla(elegida, nombre));
       console.log(`[ONLINE] ${canal} se puso en vivo, saludé`);
     }
   } catch (e) {
@@ -180,7 +238,7 @@ async function agregarCanal(canal) {
   }
   canalesOnline.push(canal);
   if (usaRedis) await redisCmd('SADD', CLAVE_CANALES, canal).catch((e) => console.error('[CANALES] Redis:', e.message));
-  await client.join(`#${canal}`).catch((e) => console.error(`[CANALES] No pude entrar a ${canal}:`, e.message || e));
+  if (client) await client.join(`#${canal}`).catch((e) => console.error(`[CANALES] No pude entrar a ${canal}:`, e.message || e));
   console.log(`[CANALES] Agregado ${canal}`);
   return { ok: true, msg: `Ahora lurkeo en ${canal}` + (usaRedis ? '' : ' (sin Upstash se pierde al reiniciar)') };
 }
@@ -191,7 +249,7 @@ async function quitarCanal(canal) {
   enVivoAntes.delete(canal);
   ultimaBienvenida.delete(canal);
   if (usaRedis) await redisCmd('SREM', CLAVE_CANALES, canal).catch((e) => console.error('[CANALES] Redis:', e.message));
-  await client.part(`#${canal}`).catch((e) => console.error(`[CANALES] No pude salir de ${canal}:`, e.message || e));
+  if (client) await client.part(`#${canal}`).catch((e) => console.error(`[CANALES] No pude salir de ${canal}:`, e.message || e));
   console.log(`[CANALES] Quitado ${canal}`);
   return { ok: true, msg: `Ya no lurkeo en ${canal}` + (usaRedis ? '' : ' (sin Upstash se pierde al reiniciar)') };
 }
@@ -206,7 +264,7 @@ async function manejarMensaje(target, context, message, self) {
   try {
     if (self) return;
     if (target.toLowerCase() !== `#${CANAL_FOLLOWS}`) return;
-    if (context.username.toLowerCase() !== CANAL_FOLLOWS) return;
+    if (!context || !context.username || context.username.toLowerCase() !== CANAL_FOLLOWS) return;
 
     const m = message.trim().toLowerCase().match(/^!lurk\s+(add|del|lista)(?:\s+(\S+))?$/);
     if (!m) return;
@@ -267,12 +325,8 @@ function vaciarFollows() {
   if (!nombres.length) return;
 
   const menciones = nombres.map((n) => `@${n}`).join(' ');
-  decir(
-    `#${CANAL_FOLLOWS}`,
-    nombres.length === 1
-      ? `holis ${menciones}, gracias por el folou`
-      : `holis ${menciones}, gracias por los folous`
-  );
+  const plantilla = nombres.length === 1 ? mensajesConfig.followUno : mensajesConfig.followVarios;
+  decir(`#${CANAL_FOLLOWS}`, aplicarPlantilla(plantilla, menciones));
 }
 
 async function suscribirFollows(sessionId) {
@@ -342,42 +396,12 @@ function conectarFollows(url = 'wss://eventsub.wss.twitch.tv/ws', esReconexion =
 }
 
 // ==========================================
-// ARRANQUE
-// ==========================================
-async function iniciar() {
-  canalesOnline = await cargarCanales();
-  const canales = [...new Set([CANAL_FOLLOWS, ...canalesOnline])];
-
-  client = new tmi.Client({
-    options: { debug: false },
-    connection: { reconnect: true, secure: true },
-    identity: {
-      username: USERNAME,
-      password: OAUTH_TOKEN.startsWith('oauth:') ? OAUTH_TOKEN : `oauth:${OAUTH_TOKEN}`
-    },
-    channels: canales
-  });
-
-  client.on('connected', () => console.log('[BOT] Conectado y lurkeando en:', canales.join(', ')));
-  client.on('notice', (canal, id, msg) => console.warn(`[NOTICE] ${canal} (${id}): ${msg}`));
-  client.on('message', manejarMensaje);
-
-  await client.connect().catch(console.error);
-
-  revisarOnline();
-  setInterval(revisarOnline, INTERVALO_ONLINE);
-  conectarFollows();
-}
-
-iniciar();
-
-// ==========================================
 // SERVIDOR HTTP (para que Render lo mantenga activo)
 // ==========================================
 const app = express();
-const VERSION = 'v3-2026-11-24';
+const VERSION = 'v3.1-2026-11-24';
 app.set('trust proxy', 1);
-app.use(express.json({ limit: '10kb' }));
+app.use(express.json({ limit: '25kb' }));
 
 // Página principal: el panel (index.html). Si el archivo falta, igual responde 200 para los pings.
 app.get('/', (req, res) => {
@@ -431,8 +455,49 @@ app.get('/api/canales', validarPanel, (req, res) => {
 app.post('/api/canales', validarPanel, responder((req) => agregarCanal(limpiarCanal(req.body && req.body.canal))));
 app.delete('/api/canales/:canal', validarPanel, responder((req) => quitarCanal(limpiarCanal(req.params.canal))));
 
+app.get('/api/mensajes', validarPanel, (req, res) => {
+  res.json(mensajesConfig);
+});
+
+app.put('/api/mensajes', validarPanel, responder(async (req) => {
+  await guardarMensajes(req.body || {});
+  return { ok: true, msg: 'Saludos guardados' };
+}));
+
 app.get('/version', (req, res) => {
   res.status(200).send(`Bot de saludos ${VERSION}`);
 });
 
-app.listen(PORT, () => console.log(`Servidor escuchando en el puerto ${PORT} (${VERSION})`));
+// ==========================================
+// ARRANQUE
+// ==========================================
+async function iniciar() {
+  canalesOnline = await cargarCanales();
+  await cargarMensajes();
+
+  app.listen(PORT, () => console.log(`Servidor escuchando en el puerto ${PORT} (${VERSION})`));
+
+  const canales = [...new Set([CANAL_FOLLOWS, ...canalesOnline])];
+
+  client = new tmi.Client({
+    options: { debug: false },
+    connection: { reconnect: true, secure: true },
+    identity: {
+      username: USERNAME,
+      password: OAUTH_TOKEN.startsWith('oauth:') ? OAUTH_TOKEN : `oauth:${OAUTH_TOKEN}`
+    },
+    channels: canales
+  });
+
+  client.on('connected', () => console.log('[BOT] Conectado y lurkeando en:', canales.join(', ')));
+  client.on('notice', (canal, id, msg) => console.warn(`[NOTICE] ${canal} (${id}): ${msg}`));
+  client.on('message', manejarMensaje);
+
+  await client.connect().catch((e) => console.error('[BOT] Error conectando a Twitch:', e.message || e));
+
+  revisarOnline();
+  setInterval(revisarOnline, INTERVALO_ONLINE);
+  conectarFollows();
+}
+
+iniciar();
