@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Panel del bot de saludos</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&display=swap" rel="stylesheet">
+<style>
+:root{--paper:#ece8f3;--ink:#1d1533;--muted:#5f5876;--line:#cfc8dd;--accent:#5b3fd0;--live:#c8262c;--off:#b3abc6;--field:#f7f5fb}
+*{box-sizing:border-box}
+html{background:var(--paper)}
+body{margin:0;min-height:100vh;color:var(--ink);font:400 1rem/1.5 "Bricolage Grotesque",system-ui,-apple-system,"Segoe UI",sans-serif;padding:max(2rem,env(safe-area-inset-top)) 1.25rem max(3rem,env(safe-area-inset-bottom))}
+main{max-width:40rem;margin:0 auto}
+h1{font-weight:800;font-size:clamp(2.3rem,9vw,3.8rem);line-height:1;letter-spacing:-.035em;margin:0 0 .7rem}
+.resumen{color:var(--muted);margin:0 0 2rem;max-width:34rem}
+form{display:flex;gap:.6rem;margin:0 0 1.75rem}
+input{flex:1;min-width:0;font:inherit;padding:.75rem .9rem;border:1.5px solid var(--line);border-radius:.5rem;background:var(--field);color:var(--ink)}
+button{font:inherit;font-weight:600;cursor:pointer;border:0;border-radius:.5rem;padding:.75rem 1.2rem;background:var(--accent);color:#fff}
+button:hover{background:#4a31b3}
+:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+ul{list-style:none;margin:0;padding:0;border-top:2px solid var(--ink)}
+li{display:flex;align-items:center;gap:.9rem;padding:.85rem 0;border-bottom:1px solid var(--line)}
+.lampara{flex:none;width:.85rem;height:.85rem;border-radius:50%;background:var(--off)}
+li.desconocido .lampara{background:none;border:2px solid var(--off)}
+li.vivo .lampara{background:var(--live)}
+.nombre{flex:1;font-size:clamp(1.5rem,5.5vw,2.2rem);font-weight:600;letter-spacing:-.025em;line-height:1.1;overflow-wrap:anywhere;color:var(--muted)}
+li.vivo .nombre{color:var(--ink)}
+.estado{font-size:.9rem;color:var(--muted)}
+li.vivo .estado{color:var(--live);font-weight:600}
+.quitar{background:none;color:var(--muted);padding:.4rem .5rem;font-weight:400;text-decoration:underline}
+.quitar:hover{background:none;color:var(--live)}
+.vacio{color:var(--muted);padding:1rem 0;border-bottom:1px solid var(--line)}
+.nota{color:var(--muted);font-size:.9rem;margin:1.5rem 0 0}
+.mensaje{min-height:1.5rem;margin:1rem 0 0;font-weight:600}
+.mensaje.error{color:var(--live)}
+.salir{background:none;color:var(--muted);font-weight:400;text-decoration:underline;padding:.5rem 0}
+.salir:hover{background:none;color:var(--ink)}
+.oculto{display:none}
+@media (prefers-reduced-motion:no-preference){
+  li.vivo .lampara{animation:pulso 2.4s ease-in-out infinite}
+  @keyframes pulso{0%,100%{box-shadow:0 0 0 0 rgba(200,38,44,.5)}50%{box-shadow:0 0 0 .45rem rgba(200,38,44,0)}}
+}
+</style>
+</head>
+<body>
+<main>
+  <section id="entrada">
+    <h1>Panel del bot</h1>
+    <p class="resumen">Ingresá la contraseña para ver y editar los canales que lurkea el bot.</p>
+    <form id="form-entrada">
+      <input id="clave" type="password" placeholder="Contraseña" autocomplete="current-password" aria-label="Contraseña" required>
+      <button type="submit">Entrar</button>
+    </form>
+  </section>
+
+  <section id="panel" class="oculto">
+    <h1>Canales que lurkea el bot</h1>
+    <p class="resumen" id="resumen"></p>
+    <form id="form-agregar">
+      <input id="canal" type="text" placeholder="nombre del canal" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="Nombre del canal" required>
+      <button type="submit">Agregar canal</button>
+    </form>
+    <ul id="lista"></ul>
+    <p class="nota" id="nota"></p>
+    <button class="salir" id="salir" type="button">Cerrar sesión</button>
+  </section>
+
+  <p class="mensaje" id="mensaje" role="status" aria-live="polite"></p>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let clave = localStorage.getItem('panel-clave') || '';
+let temporizador = null;
+
+function mostrar(dentro) {
+  $('entrada').classList.toggle('oculto', dentro);
+  $('panel').classList.toggle('oculto', !dentro);
+}
+
+function avisar(texto, error = false) {
+  const el = $('mensaje');
+  el.textContent = texto;
+  el.className = 'mensaje' + (error ? ' error' : '');
+}
+
+async function api(ruta, opciones = {}) {
+  const res = await fetch(ruta, { ...opciones, headers: { 'Content-Type': 'application/json', 'x-admin-key': clave } });
+  const datos = await res.json().catch(() => ({}));
+  if (res.status === 401) { salir(); throw new Error('Contraseña incorrecta'); }
+  if (!res.ok) throw new Error(datos.error || 'No se pudo completar la acción');
+  return datos;
+}
+
+function salir() {
+  clave = '';
+  localStorage.removeItem('panel-clave');
+  clearInterval(temporizador);
+  mostrar(false);
+}
+
+function dibujar(datos) {
+  const vivos = datos.canales.filter((c) => c.enVivo === true).length;
+  $('resumen').textContent = datos.canales.length
+    ? `${vivos} en vivo de ${datos.canales.length} canales. Cuando uno se pone en vivo, el bot lo saluda en su chat.`
+    : 'Todavía no hay canales. Agregá el primero arriba.';
+
+  const lista = $('lista');
+  lista.textContent = '';
+  for (const c of datos.canales) {
+    const li = document.createElement('li');
+    li.className = c.enVivo === true ? 'vivo' : c.enVivo === null ? 'desconocido' : '';
+
+    const lampara = document.createElement('span');
+    lampara.className = 'lampara';
+
+    const nombre = document.createElement('span');
+    nombre.className = 'nombre';
+    nombre.textContent = c.nombre;
+
+    const estado = document.createElement('span');
+    estado.className = 'estado';
+    estado.textContent = c.enVivo === true ? 'En vivo' : c.enVivo === null ? 'Sin datos' : 'Sin conexión';
+
+    const quitar = document.createElement('button');
+    quitar.type = 'button';
+    quitar.className = 'quitar';
+    quitar.dataset.canal = c.nombre;
+    quitar.textContent = 'Quitar';
+    quitar.setAttribute('aria-label', `Quitar ${c.nombre}`);
+
+    li.append(lampara, nombre, estado, quitar);
+    lista.append(li);
+  }
+
+  $('nota').textContent = `El bot también agradece los follows en #${datos.canalFollows}.`
+    + (datos.persistente ? '' : ' Sin Upstash, los cambios se pierden cuando el bot se reinicia.');
+}
+
+async function cargar() {
+  try {
+    dibujar(await api('/api/canales'));
+    mostrar(true);
+    return true;
+  } catch (e) {
+    avisar(e.message, true);
+    return false;
+  }
+}
+
+function empezar() {
+  clearInterval(temporizador);
+  temporizador = setInterval(cargar, 30000);
+}
+
+$('form-entrada').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  clave = $('clave').value;
+  avisar('');
+  if (await cargar()) {
+    localStorage.setItem('panel-clave', clave);
+    $('clave').value = '';
+    empezar();
+  }
+});
+
+$('form-agregar').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const canal = $('canal').value;
+  try {
+    const r = await api('/api/canales', { method: 'POST', body: JSON.stringify({ canal }) });
+    $('canal').value = '';
+    avisar(r.msg);
+    await cargar();
+  } catch (err) {
+    avisar(err.message, true);
+  }
+});
+
+$('lista').addEventListener('click', async (e) => {
+  const boton = e.target.closest('.quitar');
+  if (!boton) return;
+  const canal = boton.dataset.canal;
+  if (!confirm(`¿Dejar de lurkear ${canal}?`)) return;
+  try {
+    const r = await api(`/api/canales/${encodeURIComponent(canal)}`, { method: 'DELETE' });
+    avisar(r.msg);
+    await cargar();
+  } catch (err) {
+    avisar(err.message, true);
+  }
+});
+
+$('salir').addEventListener('click', () => { salir(); avisar(''); });
+
+if (clave) cargar().then((ok) => { if (ok) empezar(); });
+</script>
+</body>
+</html>
