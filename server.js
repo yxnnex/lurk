@@ -129,9 +129,9 @@ const enVivoAntes = new Map();
 const ultimaBienvenida = new Map();
 
 const SALUDOS_ONLINE = (n) => [
-  `¡Holaaa ${n}! ¡Que tengas un buen stream! dancer`,
-  `¡Holi ${n}! ¡Buen stream! :3`,
-  `¡Hola ${n}! Vine a lurkearte unu`
+  `Holaaa ${n} `,
+  `Holi ${n}! :3`,
+  `Holi ${n}
 ];
 
 async function revisarOnline() {
