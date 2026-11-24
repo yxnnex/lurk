@@ -37,6 +37,13 @@ li.vivo .estado{color:var(--live);font-weight:600}
 .mensaje.error{color:var(--live)}
 .salir{background:none;color:var(--muted);font-weight:400;text-decoration:underline;padding:.5rem 0}
 .salir:hover{background:none;color:var(--ink)}
+h2{font-weight:800;font-size:1.7rem;letter-spacing:-.025em;margin:2.75rem 0 1rem}
+.mensajes{display:block;margin:0}
+.campo{display:block;margin:0 0 1.25rem}
+.campo b{display:block;font-weight:600}
+.campo small{display:block;color:var(--muted);margin:.1rem 0 .45rem}
+.campo input,textarea{width:100%}
+textarea{font:inherit;padding:.75rem .9rem;border:1.5px solid var(--line);border-radius:.5rem;background:var(--field);color:var(--ink);resize:vertical;min-height:7.5rem}
 .oculto{display:none}
 @media (prefers-reduced-motion:no-preference){
   li.vivo .lampara{animation:pulso 2.4s ease-in-out infinite}
@@ -64,6 +71,14 @@ li.vivo .estado{color:var(--live);font-weight:600}
     </form>
     <ul id="lista"></ul>
     <p class="nota" id="nota"></p>
+
+    <h2>Saludos</h2>
+    <form id="form-mensajes" class="mensajes">
+      <label class="campo"><b>Cuando un canal se pone en vivo</b><small>Un saludo por línea; el bot elige uno al azar. {nombre} se cambia por el nombre del canal.</small><textarea id="m-online" rows="5"></textarea></label>
+      <label class="campo"><b>Cuando alguien te sigue</b><small>{nombre} se cambia por @usuario.</small><input id="m-uno" type="text" maxlength="400"></label>
+      <label class="campo"><b>Cuando varios te siguen juntos</b><small>{nombre} se cambia por la lista de @usuarios.</small><input id="m-varios" type="text" maxlength="400"></label>
+      <button type="submit">Guardar saludos</button>
+    </form>
     <button class="salir" id="salir" type="button">Cerrar sesión</button>
   </section>
 
@@ -153,7 +168,32 @@ async function cargar() {
 function empezar() {
   clearInterval(temporizador);
   temporizador = setInterval(cargar, 30000);
+  cargarMensajes();
 }
+
+async function cargarMensajes() {
+  try {
+    const m = await api('/api/mensajes');
+    $('m-online').value = m.online.join('\n');
+    $('m-uno').value = m.followUno;
+    $('m-varios').value = m.followVarios;
+  } catch (e) {
+    avisar(e.message, true);
+  }
+}
+
+$('form-mensajes').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    const r = await api('/api/mensajes', { method: 'PUT', body: JSON.stringify({
+      online: $('m-online').value.split('\n'), followUno: $('m-uno').value, followVarios: $('m-varios').value
+    }) });
+    avisar(r.msg);
+    await cargarMensajes();
+  } catch (err) {
+    avisar(err.message, true);
+  }
+});
 
 $('form-entrada').addEventListener('submit', async (e) => {
   e.preventDefault();
