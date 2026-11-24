@@ -1,0 +1,17 @@
+{
+  "name": "bot-saludos-twitch",
+  "version": "1.0.0",
+  "description": "Bot de Twitch que saluda cuando ciertos canales se ponen online y agradece los follows",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "tmi.js": "^1.8.5",
+    "ws": "^8.18.0"
+  }
+}
